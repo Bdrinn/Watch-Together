@@ -1,0 +1,22 @@
+{
+  "name": "watch-together",
+  "version": "1.0.0",
+  "description": "Watch YouTube videos together with real-time synchronization",
+  "main": "server/server.js",
+  "type": "module",
+  "scripts": {
+    "start": "node server/server.js",
+    "dev": "node --watch server/server.js",
+    "build": "npm run build:client",
+    "build:client": "cd client && npm run build"
+  },
+  "keywords": ["video", "sync", "youtube"],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "express": "^4.18.2",
+    "socket.io": "^4.5.4",
+    "cors": "^2.8.5"
+  },
+  "devDependencies": {}
+}
