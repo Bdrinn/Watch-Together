@@ -30,7 +30,7 @@ const loadYouTubeIframeApi = (timeoutMs = 4000) => {
   })
 }
 
-export default function YouTubePlayer({ videoUrl, playerRef, onEnded, initialTime = 0 }) {
+export default function YouTubePlayer({ videoUrl, roomId, socket, playerRef, syncState }) {
   const playerContainerRef = useRef(null)
   const [videoId, setVideoId] = useState('')
   const [isPlaying, setIsPlaying] = useState(false)
@@ -39,16 +39,12 @@ export default function YouTubePlayer({ videoUrl, playerRef, onEnded, initialTim
   const playerReadyRef = useRef(false)
   const autoplayCheckRef = useRef(null)
   const autoplayAttemptRef = useRef(false)
-  const initialTimeRef = useRef(initialTime)
-  const onEndedRef = useRef(onEnded)
+  const syncStateRef = useRef(null)
+  const lastSyncRef = useRef(null)
 
   useEffect(() => {
-    initialTimeRef.current = initialTime
-  }, [initialTime])
-
-  useEffect(() => {
-    onEndedRef.current = onEnded
-  }, [onEnded])
+    syncStateRef.current = syncState
+  }, [syncState])
 
   const ensureIframePermissions = () => {
     const iframe = playerRef?.current?.getIframe?.()
@@ -83,6 +79,22 @@ export default function YouTubePlayer({ videoUrl, playerRef, onEnded, initialTim
     playerRef?.current?.pauseVideo?.()
   }
 
+  const applyPlaybackState = (nextIsPlaying, timeSeconds) => {
+    const safeTime = typeof timeSeconds === 'number' && !Number.isNaN(timeSeconds)
+      ? timeSeconds
+      : null
+
+    if (safeTime !== null) {
+      playerRef?.current?.seekTo?.(safeTime, true)
+    }
+
+    if (nextIsPlaying) {
+      startPlayback(safeTime)
+    } else if (nextIsPlaying === false) {
+      pausePlayback()
+    }
+  }
+
   // Extract YouTube video ID from URL
   useEffect(() => {
     const id = extractVideoId(videoUrl)
@@ -91,6 +103,48 @@ export default function YouTubePlayer({ videoUrl, playerRef, onEnded, initialTim
     setShowPlayPrompt(false)
     playerReadyRef.current = false
   }, [videoUrl])
+
+  useEffect(() => {
+    if (!socket) return
+
+    const handleVideoPlay = (data) => {
+      applyPlaybackState(true, data?.currentTime)
+    }
+
+    const handleVideoPause = (data) => {
+      applyPlaybackState(false, data?.currentTime)
+    }
+
+    const handleVideoSeek = (data) => {
+      if (typeof data?.currentTime === 'number') {
+        playerRef?.current?.seekTo?.(data.currentTime, true)
+      }
+    }
+
+    const handleVideoChanged = () => {
+      applyPlaybackState(true, 0)
+    }
+
+    socket.on('video-play', handleVideoPlay)
+    socket.on('video-pause', handleVideoPause)
+    socket.on('video-seek', handleVideoSeek)
+    socket.on('video-changed', handleVideoChanged)
+
+    return () => {
+      socket.off('video-play', handleVideoPlay)
+      socket.off('video-pause', handleVideoPause)
+      socket.off('video-seek', handleVideoSeek)
+      socket.off('video-changed', handleVideoChanged)
+    }
+  }, [socket])
+
+  useEffect(() => {
+    if (!syncState || !playerRef?.current || !videoId) return
+    if (lastSyncRef.current === syncState.syncId) return
+
+    lastSyncRef.current = syncState.syncId
+    applyPlaybackState(syncState.isPlaying, syncState.currentTime)
+  }, [syncState, videoId])
 
   useEffect(() => {
     if (!videoId || !playerContainerRef.current) return
@@ -124,7 +178,12 @@ export default function YouTubePlayer({ videoUrl, playerRef, onEnded, initialTim
           onReady: () => {
             playerReadyRef.current = true
             ensureIframePermissions()
-            startPlayback(initialTimeRef.current)
+            const initialSync = syncStateRef.current
+            if (initialSync) {
+              applyPlaybackState(initialSync.isPlaying, initialSync.currentTime)
+            } else {
+              startPlayback(0)
+            }
           },
           onError: () => {
             setPlayerError(true)
@@ -132,10 +191,7 @@ export default function YouTubePlayer({ videoUrl, playerRef, onEnded, initialTim
           onStateChange: (event) => {
             if (event.data === YT.PlayerState.ENDED) {
               setIsPlaying(false)
-              const handler = onEndedRef.current
-              if (typeof handler === 'function') {
-                handler()
-              }
+              socket?.emit('skip-to-next', roomId)
             }
 
             if (event.data === YT.PlayerState.PLAYING) {
@@ -164,7 +220,7 @@ export default function YouTubePlayer({ videoUrl, playerRef, onEnded, initialTim
         clearTimeout(autoplayCheckRef.current)
       }
     }
-  }, [videoId, playerRef])
+  }, [videoId, roomId, socket, playerRef])
 
   const extractVideoId = (url) => {
     if (!url) return ''
@@ -206,7 +262,13 @@ export default function YouTubePlayer({ videoUrl, playerRef, onEnded, initialTim
 
   const handlePlay = () => {
     if (!isPlaying) {
-      startPlayback()
+      const playbackTime = playerRef?.current?.getCurrentTime?.()
+      const safeTime = typeof playbackTime === 'number' && !Number.isNaN(playbackTime)
+        ? playbackTime
+        : undefined
+
+      socket?.emit('play', { roomId, currentTime: safeTime })
+      startPlayback(safeTime || 0)
     }
   }
 
@@ -217,6 +279,12 @@ export default function YouTubePlayer({ videoUrl, playerRef, onEnded, initialTim
 
   const handlePause = () => {
     if (isPlaying) {
+      const playbackTime = playerRef?.current?.getCurrentTime?.()
+      const safeTime = typeof playbackTime === 'number' && !Number.isNaN(playbackTime)
+        ? playbackTime
+        : undefined
+
+      socket?.emit('pause', { roomId, currentTime: safeTime })
       pausePlayback()
     }
   }
@@ -269,7 +337,7 @@ export default function YouTubePlayer({ videoUrl, playerRef, onEnded, initialTim
         </div>
 
         <div className="info-text">
-          📹 Local playback only
+          📹 All controls sync automatically
         </div>
       </div>
     </div>

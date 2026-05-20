@@ -4,148 +4,125 @@ import RoomInfo from './RoomInfo'
 import WatchLaterList from './WatchLaterList'
 import './WatchRoom.css'
 
-const STORAGE_KEY = 'watchTogether.demoState'
-
-const loadInitialState = () => {
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY)
-    if (!raw) {
-      return { playlist: [], currentVideoIndex: -1, currentTime: 0 }
-    }
-
-    const parsed = JSON.parse(raw)
-    const playlist = Array.isArray(parsed.playlist) ? parsed.playlist : []
-    let currentVideoIndex = typeof parsed.currentVideoIndex === 'number' ? parsed.currentVideoIndex : -1
-    const currentTime = typeof parsed.currentTime === 'number' ? parsed.currentTime : 0
-
-    if (currentVideoIndex < -1) {
-      currentVideoIndex = -1
-    }
-
-    if (currentVideoIndex >= playlist.length) {
-      currentVideoIndex = playlist.length ? playlist.length - 1 : -1
-    }
-
-    return { playlist, currentVideoIndex, currentTime }
-  } catch (error) {
-    return { playlist: [], currentVideoIndex: -1, currentTime: 0 }
-  }
-}
-
-export default function WatchRoom({ roomId, onLeave }) {
-  const initialState = loadInitialState()
-  const [playlist, setPlaylist] = useState(() => initialState.playlist)
-  const [currentVideoIndex, setCurrentVideoIndex] = useState(() => initialState.currentVideoIndex)
-  const [currentTime, setCurrentTime] = useState(() => initialState.currentTime)
+export default function WatchRoom({ socket, roomId, onLeave }) {
+  const [currentVideo, setCurrentVideo] = useState('')
+  const [playlist, setPlaylist] = useState([])
+  const [currentVideoIndex, setCurrentVideoIndex] = useState(-1)
   const [inputUrl, setInputUrl] = useState('')
+  const [userCount, setUserCount] = useState(1)
+  const [syncState, setSyncState] = useState(null)
   const playerRef = useRef(null)
-  const previousVideoIndexRef = useRef(initialState.currentVideoIndex)
-
-  const currentVideo = currentVideoIndex >= 0 && currentVideoIndex < playlist.length
-    ? playlist[currentVideoIndex]
-    : ''
+  const syncCounterRef = useRef(0)
 
   useEffect(() => {
-    if (playlist.length === 0 && currentVideoIndex !== -1) {
-      setCurrentVideoIndex(-1)
-      return
+    if (!socket) return
+
+    const handleRoomState = (state) => {
+      setCurrentVideo(state.currentVideo || '')
+      setCurrentVideoIndex(state.currentVideoIndex)
+      setPlaylist(state.playlist || [])
+
+      syncCounterRef.current += 1
+      setSyncState({
+        currentTime: state.currentTime || 0,
+        isPlaying: state.isPlaying,
+        syncId: syncCounterRef.current
+      })
     }
 
-    if (currentVideoIndex >= playlist.length) {
-      setCurrentVideoIndex(playlist.length - 1)
+    const handleVideoChanged = (data) => {
+      setCurrentVideo(data.currentVideo)
+      setCurrentVideoIndex(data.currentVideoIndex)
+      setPlaylist(data.playlist)
     }
-  }, [playlist, currentVideoIndex])
 
-  useEffect(() => {
-    const previousIndex = previousVideoIndexRef.current
-    if (previousIndex !== currentVideoIndex) {
-      setCurrentTime(0)
-      previousVideoIndexRef.current = currentVideoIndex
+    const handlePlaylistUpdated = (data) => {
+      setPlaylist(data.playlist)
+      setCurrentVideoIndex(data.currentVideoIndex)
     }
-  }, [currentVideoIndex])
+
+    const handleUserJoined = (data) => {
+      setUserCount(data.userCount)
+    }
+
+    const handleUserLeft = (data) => {
+      setUserCount(data.userCount)
+    }
+
+    socket.on('room-state', handleRoomState)
+    socket.on('video-changed', handleVideoChanged)
+    socket.on('playlist-updated', handlePlaylistUpdated)
+    socket.on('user-joined', handleUserJoined)
+    socket.on('user-left', handleUserLeft)
+
+    return () => {
+      socket.off('room-state', handleRoomState)
+      socket.off('video-changed', handleVideoChanged)
+      socket.off('playlist-updated', handlePlaylistUpdated)
+      socket.off('user-joined', handleUserJoined)
+      socket.off('user-left', handleUserLeft)
+    }
+  }, [socket])
 
   useEffect(() => {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify({
-      playlist,
-      currentVideoIndex,
-      currentTime
-    }))
-  }, [playlist, currentVideoIndex, currentTime])
+    if (!socket || !roomId) return
 
-  useEffect(() => {
-    if (!currentVideo) return
-
-    const updatePlaybackSnapshot = () => {
+    const emitPlaybackSnapshot = () => {
       const player = playerRef.current
       if (!player?.getCurrentTime) return
 
       const playbackTime = player.getCurrentTime()
+      const playerState = player.getPlayerState?.()
+      const isPlaying = playerState === 1
+
       if (typeof playbackTime === 'number' && !Number.isNaN(playbackTime)) {
-        setCurrentTime(playbackTime)
+        socket.emit('sync-state', {
+          roomId,
+          currentTime: playbackTime,
+          isPlaying
+        })
       }
     }
-
-    const intervalId = setInterval(updatePlaybackSnapshot, 2000)
 
     const handleVisibilityChange = () => {
       if (document.visibilityState === 'hidden') {
-        updatePlaybackSnapshot()
+        emitPlaybackSnapshot()
       }
     }
 
-    window.addEventListener('beforeunload', updatePlaybackSnapshot)
-    window.addEventListener('pagehide', updatePlaybackSnapshot)
+    window.addEventListener('beforeunload', emitPlaybackSnapshot)
+    window.addEventListener('pagehide', emitPlaybackSnapshot)
     document.addEventListener('visibilitychange', handleVisibilityChange)
 
     return () => {
-      clearInterval(intervalId)
-      window.removeEventListener('beforeunload', updatePlaybackSnapshot)
-      window.removeEventListener('pagehide', updatePlaybackSnapshot)
+      window.removeEventListener('beforeunload', emitPlaybackSnapshot)
+      window.removeEventListener('pagehide', emitPlaybackSnapshot)
       document.removeEventListener('visibilitychange', handleVisibilityChange)
     }
-  }, [currentVideo])
+  }, [socket, roomId])
 
   const handleSetVideo = (e) => {
     e.preventDefault()
-    if (!inputUrl.trim()) return
-
-    const newUrl = inputUrl.trim()
-    setInputUrl('')
-
-    setPlaylist((prev) => [...prev, newUrl])
-    setCurrentVideoIndex((prevIndex) => (prevIndex === -1 ? 0 : prevIndex))
-    if (currentVideoIndex === -1) {
-      setCurrentTime(0)
+    if (inputUrl.trim()) {
+      setInputUrl('')
+      socket.emit('set-video', {
+        roomId,
+        videoUrl: inputUrl.trim()
+      })
     }
   }
 
   const handlePlayFromQueue = (index) => {
-    setCurrentVideoIndex(index)
-  }
-
-  const handleRemoveFromQueue = (index) => {
-    setPlaylist((prev) => {
-      const next = prev.filter((_, itemIndex) => itemIndex !== index)
-
-      setCurrentVideoIndex((prevIndex) => {
-        if (prevIndex === -1) return -1
-        if (index < prevIndex) return prevIndex - 1
-        if (index === prevIndex) {
-          if (next.length === 0) return -1
-          return Math.min(prevIndex, next.length - 1)
-        }
-        return prevIndex
-      })
-
-      return next
+    socket.emit('play-from-queue', {
+      roomId,
+      index
     })
   }
 
-  const handleVideoEnded = () => {
-    setCurrentVideoIndex((prevIndex) => {
-      if (prevIndex === -1) return -1
-      if (prevIndex < playlist.length - 1) return prevIndex + 1
-      return prevIndex
+  const handleRemoveFromQueue = (index) => {
+    socket.emit('remove-from-queue', {
+      roomId,
+      index
     })
   }
 
@@ -158,7 +135,7 @@ export default function WatchRoom({ roomId, onLeave }) {
       <div className="container">
         <div className="header">
           <h1>🎬 Watch Together</h1>
-          <RoomInfo roomId={roomId} userCount={1} onLeave={handleLeaveRoom} />
+          <RoomInfo roomId={roomId} userCount={userCount} onLeave={handleLeaveRoom} />
         </div>
 
         <div className="main-content">
@@ -166,9 +143,10 @@ export default function WatchRoom({ roomId, onLeave }) {
             {currentVideo ? (
               <YouTubePlayer
                 videoUrl={currentVideo}
+                roomId={roomId}
+                socket={socket}
                 playerRef={playerRef}
-                onEnded={handleVideoEnded}
-                initialTime={currentTime}
+                syncState={syncState}
               />
             ) : (
               <div className="no-video">
